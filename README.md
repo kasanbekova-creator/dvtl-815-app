@@ -62,7 +62,7 @@ curl -s localhost:8080/ ; curl -s localhost:8080/healthz
 ```
 
 ## Notes
-- `go test ./src/...` gates every build — a route regression fails before an image is pushed.
+- `cd src && go test ./...` gates every build — a route regression fails before an image is pushed.
 - Auth is split by design: the **OIDC role** pushes images (no git access); the **PAT** does the
   commit-back (no AWS access).
 - No-loop: this workflow triggers only on this repo; the commit-back targets the resources repo and
