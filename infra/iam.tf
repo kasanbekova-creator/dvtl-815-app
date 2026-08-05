@@ -23,9 +23,10 @@ resource "aws_iam_openid_connect_provider" "github" {
   # store, so this value is no longer security-critical, but the field is still required by the API.
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
 
+  # NOTE: no `fork` tag here — the provider's default_tags already sets `Fork`, and IAM tag keys are
+  # CASE-INSENSITIVE, so `fork` + `Fork` would collide ("Duplicate tag keys found").
   tags = {
     "dvtl-815-poc" = "true"
-    "fork"         = "github-poc"
   }
 }
 
@@ -60,9 +61,10 @@ resource "aws_iam_role" "gha_ecr_push" {
   name               = "${var.name_prefix}-env0-app-gha-ecr-push"
   assume_role_policy = data.aws_iam_policy_document.gha_trust.json
 
+  # No `fork` tag — see the OIDC provider above; provider default_tags sets `Fork`, IAM keys are
+  # case-insensitive, so a lowercase `fork` collides.
   tags = {
     "dvtl-815-poc" = "true"
-    "fork"         = "github-poc"
   }
 }
 

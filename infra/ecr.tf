@@ -22,10 +22,11 @@ resource "aws_ecr_repository" "app" {
     scan_on_push = true
   }
 
+  # No `fork` tag — provider default_tags sets `Fork`; a lowercase `fork` collides on IAM (keys are
+  # case-insensitive) and is redundant everywhere else. Kept off for consistency across the stack.
   tags = {
     "dvtl-815-poc" = "true"
     "purpose"      = "app-image"
-    "fork"         = "github-poc"
   }
 }
 
