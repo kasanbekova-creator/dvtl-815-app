@@ -1,0 +1,125 @@
+# Build + hand-off workflow for the DVTL-815 sample app (github-poc / env0 fork).
+#
+# This REPLACES the aws-poc fork's CodePipeline/CodeBuild/EventBridge — env0 is an OpenTofu runner,
+# not a Docker-build CI, so the image build lives here in GitHub Actions instead. On every push to
+# main it:
+#   1. runs the Go unit tests (a gate the aws-poc buildspec did NOT have),
+#   2. builds the app image with the git SHA baked in (-ldflags) and pushes <sha> to ECR,
+#   3. commits that SHA into dvtl-815-resources/image_tag.auto.tfvars, which is what env0's Git
+#      trigger watches — that commit starts the deploy (plan -> apply -> EKS rollout).
+#
+# ONE-DIRECTIONAL FLOW (loop-guard): step 3 pushes into the *resources* repo; this workflow only
+# triggers on the *app* repo, so the hand-off cannot ricochet back here. Belt-and-suspenders: the
+# commit message carries [skip-app-ci] and is made under a distinct bot identity, so it is always
+# distinguishable and skippable if the resources repo ever grows its own Actions.
+
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+    # Infra/docs-only changes don't need a new image. Editing src/** or the Dockerfile does.
+    paths-ignore:
+      - "infra/**"
+      - ".github/**"
+      - "README.md"
+      - ".gitignore"
+
+# OIDC: the job needs `id-token: write` to mint the GitHub OIDC JWT that AWS STS trades for the
+# ECR-push role's temporary credentials. `contents: read` is the default checkout permission.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # Serialize builds on main so two quick pushes can't race the commit-back into the resources repo.
+  group: build-and-deploy-main
+  # queue: max keeps EVERY pending run (up to 100) instead of the default `single`, which evicts a
+  # pending run when a newer one queues. Because each run has real side effects (push image ->
+  # commit tag -> trigger env0 deploy), we honor every push in order rather than dropping the
+  # middle one. NOTE: `queue: max` may NOT be combined with `cancel-in-progress: true` (GitHub
+  # rejects that pair) — so cancel-in-progress stays false, which also lets an in-flight build
+  # finish its push-back cleanly.
+  queue: max
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  # ECR repo OWNED by infra/ecr.tf (env0-dvtl815-app — distinct from the aws-poc fork's dvtl815-app).
+  ECR_REPO_URL: 355433853014.dkr.ecr.us-west-2.amazonaws.com/env0-dvtl815-app
+  # The deploy repo the image tag is committed back into, and the file within it env0 watches.
+  DEPLOY_REPO: kasanbekova-creator/dvtl-815-resources
+  IMAGE_TAG_TFVARS_PATH: image_tag.auto.tfvars
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout app repo
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      # Gate: a route regression fails the build here, before an image is ever pushed.
+      - name: Run unit tests
+        run: go test ./src/...
+
+      # The image tag is the full commit SHA — immutable and unique per commit.
+      - name: Compute image tag
+        id: tag
+        run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      # OIDC -> temporary AWS creds. No static keys. The role ARN comes from infra/ (tofu output
+      # gha_ecr_push_role_arn) and is stored as the AWS_ROLE_ARN repo secret.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          test -n "${IMAGE_TAG}" || { echo "FATAL: empty git SHA, refusing to build"; exit 1; }
+          echo "Building ${ECR_REPO_URL}:${IMAGE_TAG}"
+          # APP_VERSION is baked into the binary via -ldflags (Dockerfile), so the running app
+          # reports the exact commit it was built from.
+          docker build --build-arg "APP_VERSION=${IMAGE_TAG}" -t "${ECR_REPO_URL}:${IMAGE_TAG}" .
+          echo "Pushing ${ECR_REPO_URL}:${IMAGE_TAG}"
+          docker push "${ECR_REPO_URL}:${IMAGE_TAG}"
+
+      # Commit the new tag into the deploy repo. env0's Git trigger on that repo picks up the commit
+      # and starts the deploy. Auth is a PAT (secrets.RESOURCES_REPO_TOKEN) with write to DEPLOY_REPO
+      # — NOT the AWS role; the AWS role has no git permissions by design.
+      - name: Commit image tag back to deploy repo
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+          RESOURCES_REPO_TOKEN: ${{ secrets.RESOURCES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/deploy
+          # Token-in-URL clone over HTTPS; x-access-token is the GitHub convention for PAT auth.
+          git clone --depth 1 \
+            "https://x-access-token:${RESOURCES_REPO_TOKEN}@github.com/${DEPLOY_REPO}.git" /tmp/deploy
+          cd /tmp/deploy
+          git config user.name "dvtl815-app-pipeline"
+          git config user.email "dvtl815-app-pipeline@natera.local"
+          # Overwrite the tag file. Idempotent: if the tag is unchanged (a re-run of the same commit),
+          # there is nothing to commit and we skip the push rather than erroring.
+          printf 'app_image_tag = "%s"\n' "${IMAGE_TAG}" > "${IMAGE_TAG_TFVARS_PATH}"
+          git add "${IMAGE_TAG_TFVARS_PATH}"
+          if git diff --cached --quiet; then
+            echo "image tag already ${IMAGE_TAG} in ${DEPLOY_REPO} — nothing to commit, skipping push."
+          else
+            git commit -m "ci: deploy app image ${IMAGE_TAG} [skip-app-ci]"
+            git push origin HEAD:main
+            echo "Pushed tag bump to ${DEPLOY_REPO}; env0 will start a deploy on the new commit."
+          fi

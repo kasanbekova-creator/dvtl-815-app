@@ -1,0 +1,23 @@
+# OpenTofu / Terraform (infra/ stack)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+
+# Variable files (may contain secrets) — keep examples
+*.tfvars
+*.tfvars.json
+!*.example.tfvars
+
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored (committed so plan/apply resolve identical
+# provider versions).
+
+# Go build output
+/out/
+app
+
+# OS
+.DS_Store
