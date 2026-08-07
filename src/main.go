@@ -24,7 +24,7 @@ import (
 var version = "dev"
 
 // EDIT ME to prove the deploy loop: change this string, push, let env0 deploy, reload the page.
-const greeting = "Hello from the DVTL-815 sample app! (env0 fork) test hello"
+const greeting = "Hello from the DVTL-815 sample app! (env0 fork) testing"
 
 // newMux builds the app's routing table. Extracted from main() so tests (main_test.go) exercise the
 // REAL routes — including the /healthz closure — instead of a duplicate. main() is now just bind+serve.
